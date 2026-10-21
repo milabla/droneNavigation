@@ -1,0 +1,12 @@
+@"
+logs*/
+*.zip
+*.npz
+__pycache__/
+.idea/
+.venv*/
+venv*/
+.venv310*/
+trajectory*.png
+gym-pybullet-drones/
+"@ | Out-File -Encoding ascii .gitignore
