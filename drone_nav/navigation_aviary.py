@@ -56,6 +56,7 @@ class NavigationAviary(BaseRLAviary):
         self.CEILING = ceiling          # flight ceiling (m): can't just fly over tall obstacles
         self._tall_prob = tall_prob     # fraction of obstacles that are floor-to-ceiling pillars
         self._prev_dist_to_target = None
+        self._prev_phi = 0.0
         self._collided = False
         self._reached_goal = False
 
@@ -240,6 +241,11 @@ class NavigationAviary(BaseRLAviary):
         return np.hstack([base_obs, extra]).astype('float32')
 
 
+    def _phi(self, dist):
+        closeness = max(0.0, 1.0 - dist / self.PROXIMITY_RANGE)
+        return 3.0 * closeness ** 2
+
+
     #  Reward
     def _computeReward(self):
         state = self._getDroneStateVector(0)
@@ -251,15 +257,18 @@ class NavigationAviary(BaseRLAviary):
         progress = self._prev_dist_to_target - dist_to_target
         reward = 10.0 * progress
         self._prev_dist_to_target = dist_to_target
-
+        self._prev_dist_to_target = float(np.linalg.norm(self.TARGET_POS - state[0:3]))
+        self._prev_phi = self._phi(self._prev_dist_to_target)
         # 1b) continuous proximity bonus, based on absolute distance (not delta)
         #     This is what actually pulls the drone the last
         #     bit of the way in, instead of letting it "coast" near the goal
         #     with a near-zero delta signal. Shaped as a smooth, increasingly
         #     steep funnel: 0 at PROXIMITY_RANGE, growing as dist -> 0
-        if dist_to_target < self.PROXIMITY_RANGE:
-            closeness = 1.0 - (dist_to_target / self.PROXIMITY_RANGE)  # 0..1
-            reward += 3.0 * (closeness ** 2)
+        # 1b) potential-based shaping: reward only for getting closer,
+        #     so hovering near the goal earns nothing
+        phi_new = self._phi(dist_to_target)
+        reward += 0.99 * phi_new - self._prev_phi
+        self._prev_phi = phi_new
 
         # 2) Small step penalty, encourages efficient (short) paths.
         reward -= 0.01
