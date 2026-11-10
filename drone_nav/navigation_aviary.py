@@ -29,7 +29,7 @@ class NavigationAviary(BaseRLAviary):
                  obstacle_xy_bounds=((0.5, 2.0), (0.5, 2.0)),
                  min_clearance: float = 0.35,
                  wind_std: float = 0.0,
-                 episode_len_sec: float = 15.0,
+                 episode_len_sec: float = 30.0,
                  bounds: float = 3.0,
                  goal_radius: float = 0.22,
                  proximity_range: float = 0.8,
