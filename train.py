@@ -8,8 +8,7 @@ from stable_baselines3.common.callbacks import EvalCallback, CheckpointCallback,
 
 from gym_pybullet_drones.utils.enums import ActionType, Physics
 
-from drone_nav.navigation_aviary_v5 import NavigationAviary
-
+from drone_nav.navigation_aviary import NavigationAviary
 
 def make_env(wind_std: float, randomize: bool, seed: int = 0, difficulty: float = 1.0):
     def _init():

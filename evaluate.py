@@ -7,8 +7,7 @@ from mpl_toolkits.mplot3d import Axes3D  # noqa: F401 (needed for 3D projection)
 from stable_baselines3 import PPO
 from gym_pybullet_drones.utils.enums import ActionType, Physics
 
-from drone_nav.navigation_aviary_v5 import NavigationAviary
-
+from drone_nav.navigation_aviary import NavigationAviary
 
 def plot_cylinder(ax, center, radius, height, color, alpha=0.35):
     z_base = center[2] - height / 2.0
