@@ -35,7 +35,13 @@ class NavigationAviary(BaseRLAviary):
                  proximity_range: float = 0.8,
                  drone_radius: float = 0.06,
                  ceiling: float = 2.2,
-                 tall_prob: float = 0.5):
+                 tall_prob: float = 0.5,
+                 proximity_penalty: float = 0.1,
+                 trunc_penalty_base: float = 10.0,
+                 trunc_penalty_per_m: float = 5.0,
+                 collision_penalty: float = 30.0,
+                 num_obs_tracked: int = 3,
+                 difficulty: float = 1.0):
 
         self._randomize = randomize
         self._num_obstacles_range = num_obstacles_range
@@ -44,6 +50,9 @@ class NavigationAviary(BaseRLAviary):
         self._target_bounds = target_bounds
         self._obstacle_xy_bounds = obstacle_xy_bounds
         self._min_clearance = min_clearance
+        self._difficulty = float(np.clip(difficulty, 0.0, 1.0))
+        self.NUM_OBS_TRACKED = num_obs_tracked
+        self.COLLISION_PENALTY = collision_penalty
 
         self.OBSTACLE_IDS = []
 
@@ -53,8 +62,11 @@ class NavigationAviary(BaseRLAviary):
         self.GOAL_RADIUS = goal_radius
         self.PROXIMITY_RANGE = proximity_range
         self.DRONE_RADIUS = drone_radius
-        self.CEILING = ceiling          # flight ceiling (m): can't just fly over tall obstacles
-        self._tall_prob = tall_prob     # fraction of obstacles that are floor-to-ceiling pillars
+        self.CEILING = ceiling
+        self._tall_prob = tall_prob
+        self.PROXIMITY_PENALTY = proximity_penalty
+        self.TRUNC_PENALTY_BASE = trunc_penalty_base
+        self.TRUNC_PENALTY_PER_M = trunc_penalty_per_m
         self._prev_dist_to_target = None
         self._prev_phi = 0.0
         self._collided = False
@@ -88,26 +100,40 @@ class NavigationAviary(BaseRLAviary):
                           obs=obs,
                           act=act)
 
+    #  Curriculum control (callable through VecEnv.env_method)
+    def set_difficulty(self, d: float):
+        self._difficulty = float(np.clip(d, 0.0, 1.0))
+
+    def get_difficulty(self) -> float:
+        return self._difficulty
 
     #  Domain randomization: sample a fresh scene (target + obstacles)
     def _sample_scene(self, start_xy):
         (xmin, xmax), (ymin, ymax), (zmin, zmax) = self._target_bounds
+        d = self._difficulty
+        scale = 0.4 + 0.6 * d   # easy: target pulled toward the start; hard: full distance
+        start3 = np.array([start_xy[0], start_xy[1], self._start_xyzs[0][2]])
 
-        # 1) Sample target, rejecting points too close to the start
+        # Sample target, rejecting points too close to the start
         target = None
+        candidate = None
         for _ in range(100):
-            candidate = np.array([
+            full = np.array([
                 np.random.uniform(xmin, xmax),
                 np.random.uniform(ymin, ymax),
                 np.random.uniform(zmin, zmax),
             ])
-            if np.linalg.norm(candidate[:2] - start_xy) > 4 * self._min_clearance:
+            candidate = start3 + (full - start3) * scale
+            if np.linalg.norm(candidate[:2] - start_xy) > 4 * self._min_clearance * scale:
                 target = candidate
                 break
         self.TARGET_POS = target if target is not None else candidate
 
-        # 2) Sample a random number of cylindrical obstacles
-        n_obst = np.random.randint(self._num_obstacles_range[0], self._num_obstacles_range[1] + 1)
+        # Sample cylindrical obstacles, count scales with difficulty (0 -> none)
+        lo, hi = self._num_obstacles_range
+        hi_eff = int(round(hi * d))
+        lo_eff = min(lo, hi_eff)
+        n_obst = np.random.randint(lo_eff, hi_eff + 1)
         (oxmin, oxmax), (oymin, oymax) = self._obstacle_xy_bounds
         obstacles = []
         attempts = 0
@@ -115,9 +141,9 @@ class NavigationAviary(BaseRLAviary):
             attempts += 1
             radius = np.random.uniform(*self._obstacle_radius_range)
             if np.random.rand() < self._tall_prob:
-                height = self.CEILING  # pillar: must be flown AROUND
+                height = self.CEILING
             else:
-                height = np.random.uniform(self._obstacle_height_range[0], 0.9)  # low: can go OVER
+                height = np.random.uniform(self._obstacle_height_range[0], 0.9)
             xy = np.array([np.random.uniform(oxmin, oxmax), np.random.uniform(oymin, oymax)])
 
             if np.linalg.norm(xy - start_xy) < self._min_clearance + radius:
@@ -132,8 +158,7 @@ class NavigationAviary(BaseRLAviary):
 
         self.NAV_OBSTACLES = obstacles
 
-
-    #  Obstacles (rendered as vertical cylinders)
+    #  Obstacles
     def _addObstacles(self):
         self.OBSTACLE_IDS = []
         for obst in self.NAV_OBSTACLES:
@@ -145,15 +170,13 @@ class NavigationAviary(BaseRLAviary):
                                              physicsClientId=self.CLIENT)
             collision_id = p.createCollisionShape(p.GEOM_CYLINDER, radius=radius, height=height,
                                                    physicsClientId=self.CLIENT)
-            body_id = p.createMultiBody(baseMass=0,  # static obstacle
+            body_id = p.createMultiBody(baseMass=0,
                                          baseCollisionShapeIndex=collision_id,
                                          baseVisualShapeIndex=visual_id,
                                          basePosition=pos,
                                          physicsClientId=self.CLIENT)
             self.OBSTACLE_IDS.append(body_id)
 
-        # Small visual marker for the goal (no collision shape -> doesn't
-        # interfere with physics or with the collision check).
         goal_visual = p.createVisualShape(p.GEOM_SPHERE, radius=self.GOAL_RADIUS,
                                            rgbaColor=[0.1, 0.9, 0.1, 0.5],
                                            physicsClientId=self.CLIENT)
@@ -161,7 +184,6 @@ class NavigationAviary(BaseRLAviary):
                            baseVisualShapeIndex=goal_visual,
                            basePosition=self.TARGET_POS.tolist(),
                            physicsClientId=self.CLIENT)
-
 
     #  Reset
     def reset(self, seed: int = None, options: dict = None):
@@ -172,79 +194,76 @@ class NavigationAviary(BaseRLAviary):
         obs, info = super().reset(seed=seed, options=options)
         state = self._getDroneStateVector(0)
         self._prev_dist_to_target = float(np.linalg.norm(self.TARGET_POS - state[0:3]))
+        self._prev_phi = self._phi(self._prev_dist_to_target)
         self._collided = False
         self._reached_goal = False
         return obs, info
-
 
     #  Nondeterministic transition: random wind disturbance
     def step(self, action):
         if self.WIND_STD > 0:
             drone_id = self.DRONE_IDS[0]
             wind_force = np.random.normal(0.0, self.WIND_STD, size=3)
-            wind_force[2] *= 0.3  # wind mostly horizontal, weaker vertical component
+            wind_force[2] *= 0.3
             p.applyExternalForce(objectUniqueId=drone_id,
                                   linkIndex=-1,
                                   forceObj=wind_force.tolist(),
                                   posObj=[0, 0, 0],
                                   flags=p.LINK_FRAME,
                                   physicsClientId=self.CLIENT)
-        return super().step(action)
-
+        obs, reward, terminated, truncated, info = super().step(action)
+        if truncated and not terminated:
+            reward -= self.TRUNC_PENALTY_BASE + self.TRUNC_PENALTY_PER_M * info["dist_to_target"]
+        return obs, reward, terminated, truncated, info
 
     #  Helpers
-    def _nearest_obstacle_info(self, pos):
-        """Returns (distance_to_surface, relative_vector_to_center) for the
-        closest obstacle, using a cheap analytic point-to-cylinder distance
-        (rounded-corner approximation: combines horizontal and vertical
-        clearance instead of a true capsule sdf, which is enough for reward
-        shaping / observations)."""
-        best_dist = np.inf
-        best_vec = np.zeros(3)
-        if not self.NAV_OBSTACLES:
-            return best_dist, best_vec
+    def _obstacle_infos(self, pos):
+        # List of (distance_to_surface, vector_to_center) for every obstacle, nearest first.
+        infos = []
         for obst in self.NAV_OBSTACLES:
             center = np.array(obst["pos"])
             radius = obst["radius"]
             half_h = obst["height"] / 2.0
-
-            horiz_vec = pos[:2] - center[:2]
-            horiz_dist = np.linalg.norm(horiz_vec)
+            horiz_dist = np.linalg.norm(pos[:2] - center[:2])
             dx = max(horiz_dist - radius, 0.0)
             dz = max(abs(pos[2] - center[2]) - half_h, 0.0)
-            dist_to_surface = float(np.hypot(dx, dz)) - self.DRONE_RADIUS
+            infos.append((float(np.hypot(dx, dz)) - self.DRONE_RADIUS, center - pos))
+        infos.sort(key=lambda t: t[0])
+        return infos
 
-            if dist_to_surface < best_dist:
-                best_dist = dist_to_surface
-                best_vec = center - pos
-        return best_dist, best_vec
+    def _nearest_obstacle_info(self, pos):
+        infos = self._obstacle_infos(pos)
+        if not infos:
+            return np.inf, np.zeros(3)
+        return infos[0]
 
-
-    #  Observation space: kinematic state + goal-relative + obstacle-relative
+    #  Observation space: kinematic state + goal-relative + K nearest obstacles
     def _observationSpace(self):
-        base_space = super()._observationSpace()  # Box, shape (1, 12 + 4*buffer)
-        extra_low = np.array([[-np.inf] * 7])   # rel_vec_to_goal(3) + rel_vec_to_obst(3) + dist_to_obst(1) -> 7
-        extra_high = np.array([[np.inf] * 7])
+        base_space = super()._observationSpace()
+        n_extra = 3 + 4 * self.NUM_OBS_TRACKED
+        extra_low = np.array([[-np.inf] * n_extra])
+        extra_high = np.array([[np.inf] * n_extra])
         low = np.hstack([base_space.low, extra_low])
         high = np.hstack([base_space.high, extra_high])
         return spaces.Box(low=low, high=high, dtype=np.float32)
 
     def _computeObs(self):
-        base_obs = super()._computeObs()  # shape (1, 12 + 4*buffer)
+        base_obs = super()._computeObs()
         state = self._getDroneStateVector(0)
         pos = state[0:3]
         rel_goal = self.TARGET_POS - pos
-        obst_dist, obst_vec = self._nearest_obstacle_info(pos)
-        if not np.isfinite(obst_dist):
-            obst_dist = 10.0  # no obstacles this episode -> "far away" placeholder
-        extra = np.hstack([rel_goal, obst_vec, [obst_dist]]).astype('float32').reshape(1, 7)
+        infos = self._obstacle_infos(pos)[:self.NUM_OBS_TRACKED]
+        parts = [rel_goal]
+        for dist, vec in infos:
+            parts.append(np.hstack([vec, [dist]]))
+        for _ in range(self.NUM_OBS_TRACKED - len(infos)):
+            parts.append(np.array([0.0, 0.0, 0.0, 10.0]))   # "no obstacle" placeholder: far away
+        extra = np.hstack(parts).astype('float32').reshape(1, -1)
         return np.hstack([base_obs, extra]).astype('float32')
-
 
     def _phi(self, dist):
         closeness = max(0.0, 1.0 - dist / self.PROXIMITY_RANGE)
         return 3.0 * closeness ** 2
-
 
     #  Reward
     def _computeReward(self):
@@ -253,46 +272,30 @@ class NavigationAviary(BaseRLAviary):
         dist_to_target = float(np.linalg.norm(self.TARGET_POS - pos))
         obst_dist, _ = self._nearest_obstacle_info(pos)
 
-        # 1) Progress shaping: positive when getting closer to the goal
         progress = self._prev_dist_to_target - dist_to_target
         reward = 10.0 * progress
         self._prev_dist_to_target = dist_to_target
-        self._prev_dist_to_target = float(np.linalg.norm(self.TARGET_POS - state[0:3]))
-        self._prev_phi = self._phi(self._prev_dist_to_target)
-        # 1b) continuous proximity bonus, based on absolute distance (not delta)
-        #     This is what actually pulls the drone the last
-        #     bit of the way in, instead of letting it "coast" near the goal
-        #     with a near-zero delta signal. Shaped as a smooth, increasingly
-        #     steep funnel: 0 at PROXIMITY_RANGE, growing as dist -> 0
-        # 1b) potential-based shaping: reward only for getting closer,
-        #     so hovering near the goal earns nothing
         phi_new = self._phi(dist_to_target)
         reward += 0.99 * phi_new - self._prev_phi
         self._prev_phi = phi_new
 
-        # 2) Small step penalty, encourages efficient (short) paths.
         reward -= 0.01
 
-        # 3) Obstacle proximity penalty (soft, grows as drone gets close)
         if obst_dist < 0.3:
-            reward -= 0.5 * (0.3 - obst_dist) / 0.3
+            reward -= self.PROXIMITY_PENALTY * (0.3 - obst_dist) / 0.3
 
-        # 4) Hard collision penalty + episode ends
         if obst_dist < 0.0:
             self._collided = True
-            reward -= 50.0
+            reward -= self.COLLISION_PENALTY
 
-        # 4b) Soft penalty for hugging the ceiling (stops "just climb above everything")
         if pos[2] > self.CEILING - 0.2:
             reward -= 0.5
 
-        # 5) Goal bonus
         if dist_to_target < self.GOAL_RADIUS:
             self._reached_goal = True
             reward += 100.0
 
         return reward
-
 
     #  Termination / truncation
     def _computeTerminated(self):
@@ -312,5 +315,6 @@ class NavigationAviary(BaseRLAviary):
         return {
             "collided": self._collided,
             "reached_goal": self._reached_goal,
+            "is_success": self._reached_goal,
             "dist_to_target": self._prev_dist_to_target,
         }

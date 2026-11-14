@@ -7,12 +7,10 @@ from mpl_toolkits.mplot3d import Axes3D  # noqa: F401 (needed for 3D projection)
 from stable_baselines3 import PPO
 from gym_pybullet_drones.utils.enums import ActionType, Physics
 
-from drone_nav.navigation_aviary import NavigationAviary
+from drone_nav.navigation_aviary_v5 import NavigationAviary
 
 
 def plot_cylinder(ax, center, radius, height, color, alpha=0.35):
-    """Draws a vertical cylinder obstacle centered at center
-    (base is at center_z - height/2, top at center_z + height/2)."""
     z_base = center[2] - height / 2.0
     theta = np.linspace(0, 2 * np.pi, 24)
     z = np.linspace(z_base, z_base + height, 2)
@@ -63,7 +61,7 @@ def main():
     parser.add_argument('--fixed_scene', action='store_true',
                          help='Disable domain randomization: reuse the one fixed layout every episode.')
     parser.add_argument('--gui', action='store_true', help='Show PyBullet GUI (only works with a display)')
-    parser.add_argument('--out', type=str, default='trajectory.png', help='Output plot filename')
+    parser.add_argument('--out', type=str, default='trajectory_v5.png', help='Output plot filename')
     args = parser.parse_args()
 
     env = NavigationAviary(gui=args.gui, act=ActionType.VEL, physics=Physics.PYB,
@@ -104,3 +102,4 @@ def main():
 
 if __name__ == '__main__':
     main()
+
