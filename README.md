@@ -1,179 +1,140 @@
-# Навигација на дрон низ 3D простор со Deep Reinforcement Learning
+# Drone Navigation with Deep Reinforcement Learning
 
-Проект за предметот **Агентно базирани системи**. Еден автономен дрон
-(quadrotor), симулиран во **PyBullet** (преку `gym-pybullet-drones`), учи
-преку **длабоко учење со поттикнување (Deep RL)** да лета од старт позиција
-до цел во целосен 3D простор (x, y, висина z), избегнувајќи цилиндрични
-пречки.
 
-## Теми изучувани во предметот
 
-| Тема од курсот | Каде се појавува во проектот |
-|---|---|
-| 1. Апстракција на агенти | Дронот = агент; environment-от = PyBullet физичка симулација; сензори = kinematic state + релативни вектори до цел/пречки; актуатори = 3D velocity команда |
-| 2. Недетерминистички агенти | Опционален случаен ветер (`wind_std`) во `NavigationAviary.step()` — истата акција не мора да доведе до иста следна состојба |
-| 3. Марков процеси на одлучување (MDP) | Формална дефиниција подолу: S, A, T, R |
-| 4-5. Учење со поттикнување / Длабоко RL | PPO (`stable-baselines3`) со невронска мрежа како policy (`MlpPolicy`) |
-| 6. Примери и области на примена | Автономна навигација на дронови (delivery, инспекција, пребарување и спасување) |
-| 9-10. Моделирање и симулација | Целиот проект е symbolic/physical симулација на реален систем; domain randomization (подолу) е директна демонстрација зошто генерализацијата е потешка од меморирањето |
+## Project overview
 
-## MDP-формулација
+A simulated quadcopter (Crazyflie 2.X) learns to fly on its own from a start
+point to a goal in 3D space while avoiding obstacles. Nobody writes the flight
+rules by hand: the drone learns by trial and error in a physics simulation
+(**PyBullet**, through the `gym-pybullet-drones` library), using the **PPO**
+algorithm from `stable-baselines3`.
 
-- **States (S)** — 79-димензионален вектор: kinematic состојба на дронот
-  (позиција, ориентација-quaternion, линеарна и аголна брзина), последните
-  акции во буфер (за глаткост на управувањето), плус **релативен вектор до
-  целта** и **релативен вектор + растојание до најблиската пречка**
-  (додадени во `NavigationAviary._computeObs`).
-- **Actions (A)** — континуиран 4D вектор во `[-1, 1]`: 3D насока на
-  движење (vx, vy, vz) + yaw, кој внатрешно PID контролерот го претвора во
-  индивидуални RPM на 4-те мотори (`ActionType.VEL`). Одржувањето на
-  стабилен лет (компензација на гравитација, итн.) е решено од овој
-  класичен PID контролер — RL агентот одлучува само на повисоко ниво
-  (во која насока сака да лета).
-- **Transition (T)** — PyBullet симулација на крута тела (маса, инерција,
-  аеродинамика на пропелери). Со `wind_std > 0`, при секој чекор се
-  применува случајна хоризонтална сила → **недетерминистички** MDP.
-- **Reward (R)** — обликуван (shaped) реворд во `_computeReward()`:
-  - `+10 * (претходно_растојание - тековно_растојание)` — напредок кон целта
-  - `-0.01` по чекор — поттик за ефикасен (краток) пат
-  - мека казна кога дронот е близу до пречка (< 0.3m од површината)
-  - `-50` тврда казна при судар (крај на епизодата)
-  - `+100` бонус при достигнување на целта (< `goal_radius`)
-- **Терминација** — судар или достигната цел.
-- **Truncation** — излегување надвор од дозволената кутија, преголем
-  наклон (tilt), или истек на времето по епизода (`episode_len_sec`).
+- **Task:** the drone starts at (0, 0, 1) m and has to reach a randomly placed goal.
+- **Obstacles:** vertical cylinders (pillars) that are flown around or over,
+  and horizontal cylinders (poles) at three heights (low, middle, high), where
+  the drone decides whether to pass over, under or around.
+- **Reward:** positive when the drone gets closer to the goal and when it
+  reaches it, negative when it crashes.
+- **Generalization:** every new attempt uses a new random scene (domain
+  randomization), so the drone learns a general rule instead of one path.
+- **Result:** on 1000 fixed scenes with horizontal obstacles, the model trained
+  with horizontal obstacles reaches the goal in 67.5% of the episodes (versus
+  60.9% for the model trained only with vertical obstacles).
 
-## Domain randomization: зошто дронот генерализира, не меморира
 
-Environment-от нуди два режима:
+## Files
 
-- **`randomize=True` (default)** — при **секој `reset()`** се генерира нова,
-  случајна сцена: случаен број на пречки (2-4), секоја е **вертикален
-  цилиндар** со случаен радиус и висина (не сфера — намерно, за да постои
-  реална разлика меѓу „висока и тесна" пречка, кај која е поисплатливо да
-  се заобиколи странично, и „ниска и широка", кај која е поисплатливо да
-  се прелета одозгора), плус случајна (x, y, z) позиција на целта.
-- **`randomize=False` / `--fixed_scene`** — репродуцира една фиксна сцена
-  (истата на секој reset), корисно како „меморирање"-baseline за споредба.
+- `drone_nav/navigation_aviary.py` - the environment: places the goal and the
+  obstacles, defines what the drone sees (observation), the reward and when an
+  episode ends.
+- `drone_nav/__init__.py` - makes the `drone_nav` folder a Python package.
+- `train.py` - trains the PPO model and saves the models (checkpoints,
+  `best_model`, `final_model`).
+- `evaluate.py` - loads a saved model, flies a few episodes and draws 3D
+  trajectory plots (or shows a live flight with `--gui`).
+- `evaluate_stats.py` - numeric evaluation on fixed scenes (seed 1000
+  onwards): how many episodes reached the goal, collided or timed out, and
+  how the drone passes the horizontal obstacles (over/under/around). Writes a
+  `.txt` and a `.json` file.
+- `requirements.txt` - list of packages and versions.
+- `eval_after_horizontal.png`, `my_eval_updated.png` - example plots from
+  evaluating a model (`evaluate.py --out ...`).
+- `proba.py` - a small check that the packages are installed and working.
+- `.gitignore` - files that Git ignores.
 
-Ова е **domain randomization** — стандардна техника во RL за роботика.
-Бидејќи агентот никогаш не гледа иста сцена двапати во randomized режим,
-единствениот начин да добие висок reward е да научи **општо** правило
-засновано на релативна геометрија на пречката (форма, растојание, насока),
-наместо да „научи напамет" една конкретна патека. Ова директно се спротивставува
-на прашањето „како гледа дали е подобро да прелета одозгора или да заобиколи" —
-одговорот е дека **не постои експлицитно геометриско правило во кодот**;
-однесувањето е *emergent* (произлезено) од илјадници епизоди проба-грешка,
-водено единствено од reward функцијата.
-
-**Важна напомена**: randomized-верзијата ја решава многу потешка задача
-(цела дистрибуција на сцени, не само една), затоа веројатно ќе и требаат
-**повеќе** тренировочни чекори (препорачувам 1M+) за да достигне сличен
-success rate како фиксната верзија. Ова е самото по себе добра поента за
-извештајот — класична размена помеѓу генерализација и брзина на учење.
-
-## Структура на проектот
-
-```
-drone_rl_project/
-├── drone_nav/
-│   ├── __init__.py
-│   └── navigation_aviary.py   # Custom Gymnasium environment (MDP имплементација)
-├── train.py                    # Тренирање PPO агент (stable-baselines3)
-├── evaluate.py                 # Вчитување трениран модел + 3D плот на траекторија(и)
-├── requirements.txt
-└── README.md
-```
-
-## Инсталација
+## Installation
 
 ```bash
-# 1. Основни пакети
-pip install pybullet gymnasium stable-baselines3 tensorboard tqdm rich matplotlib
-
-# 2. gym-pybullet-drones (мора од извор, содржи URDF модели и физика на дрон)
+# 1. gym-pybullet-drones (must be installed from source)
 git clone https://github.com/utiasDSL/gym-pybullet-drones.git
-cd gym-pybullet-drones && pip install -e .
+cd gym-pybullet-drones
+pip install -e .
 cd ..
 
-# Ако добиеш "No module named 'pkg_resources'":
+# 2. the remaining packages
+pip install -r requirements.txt
+
+# if you get "No module named 'pkg_resources'":
 pip install "setuptools<81"
-
-# Ако немаш GPU (препорачано за овој проект, PyBullet и онака работи на CPU):
-pip install torch --index-url https://download.pytorch.org/whl/cpu
 ```
 
-> **Важно (Windows/PyCharm)**: ако имаш повеќе Python верзии инсталирани,
-> провери секогаш дека `pip install` оди кон истиот Python што PyCharm/
-> проектот го користи. Најсигурно е да отвориш Terminal ВНАТРЕ во PyCharm
-> (тој автоматски го користи проектниот interpreter), или да го викаш pip
-> преку целосна патека:
-> `C:\...\Python311\python.exe -m pip install <пакет>`
+Use the Python interpreter of the project (in PyCharm, open the Terminal
+inside the project, which automatically uses the right interpreter).
 
-> **Важно (простор на диск)**: стандардниот `pip install torch` на Linux
-> по default повлекува CUDA пакети од неколку GB. Ако немаш/не ти треба
-> GPU, инсталирај ја CPU верзијата со командата погоре.
-
-## Тренирање
+Check that everything is installed:
 
 ```bash
-# Брз тест (неколку минути, само за проверка дека сѐ работи):
-python3 train.py --timesteps 5000 --n_envs 2
-
-# Вистинско тренирање со domain randomization (default вклучено;
-# препорачано барем 1M чекори, бидејќи задачата е потешка од фиксна сцена):
-python3 train.py --timesteps 1000000 --n_envs 6 --logdir ./logs
-
-# Baseline за споредба: фиксна сцена (без randomization) - "меморирање":
-python3 train.py --timesteps 300000 --n_envs 6 --fixed_scene --logdir ./logs_fixed
-
-# Со недетерминистички ветер (тема 2 од курсот):
-python3 train.py --timesteps 1000000 --n_envs 6 --wind_std 0.15 --logdir ./logs_wind
-
-# Продолжување на тренирање од веќе зачуван модел:
-python3 train.py --timesteps 500000 --n_envs 6 --resume logs/final_model.zip --logdir ./logs
-
-# Следење на кривата на учење во живо:
-tensorboard --logdir ./logs
+python proba.py
 ```
 
-`train.py` автоматски снима checkpoint-и (во `logs/checkpoints/`) и го чува
-најдобриот модел (по евалуациски реворд, не мора да е последниот!) во
-`logs/best_model/best_model.zip`. Секој `.zip` е снимка на тежините на
-невронската мрежа во конкретен момент од тренирањето — не се отпакуваат
-рачно, се вчитуваат директно со `PPO.load(...)`.
+## How to run the commands
 
-## Евалуација / визуелизација
+Run all commands from the main folder of the project.
+
+### Training (`train.py`)
 
 ```bash
-# Статичен 3D плот (по default: grid од N подплотови, еден по епизода,
-# бидејќи секоја епизода со randomize=True има РАЗЛИЧНА сцена):
-python3 evaluate.py --model logs/best_model/best_model.zip --episodes 4
+# Quick test (a few minutes)
+python train.py --timesteps 5000 --n_envs 2
 
-# Со фиксна сцена (репродуцира иста сцена секој пат):
-python3 evaluate.py --model logs/best_model/best_model.zip --fixed_scene --episodes 3
+# Train from scratch with the curriculum (from easy to hard)
+python train.py --timesteps 1000000
 
-# Со PyBullet GUI (лет во живо на екран, само на локална машина со display):
-python3 evaluate.py --model logs/best_model/best_model.zip --gui --episodes 3
+# Continue from a saved model, at full difficulty, without the curriculum
+python train.py --resume logs/final_model.zip --no_curriculum --timesteps 1500000 --logdir ./logs_horizontal
+
+# Fixed scene (only a "memorization" baseline for comparison)
+python train.py --timesteps 300000 --fixed_scene --logdir ./logs_fixed
+
+# With random wind
+python train.py --timesteps 1000000 --wind_std 0.15 --logdir ./logs_wind
+
+# Watch the learning curves
+python -m tensorboard.main --logdir ./logs
 ```
 
-Ова генерира `trajectory.png` — за секоја епизода посебен 3D подплот со
-патеката на дронот, старт (црна точка) и крајна позиција (X), пречките
-(црвени цилиндри) и целта (зелена сфера).
+Options: `--timesteps` (total steps), `--n_envs` (parallel environments),
+`--logdir` (output folder), `--resume` (model to continue from),
+`--no_curriculum` (full difficulty from the start), `--fixed_scene`,
+`--wind_std`.
 
-## Идеи за проширување (за подетален извештај / повеќе поени)
+Output: `logdir/checkpoints/` (every 50,000 steps),
+`logdir/best_model/best_model.zip` and `logdir/final_model.zip`.
 
-- **Multi-agent**: втор дрон и координација/
-  избегнување судар меѓу дронови `MultiHoverAviary` во
-  `gym-pybullet-drones` е добра појдовна точка.
-- **Споредба на алгоритми**: PPO vs SAC vs TD3 (сите достапни во
-  `stable-baselines3`) спореди брзина на конвергенција.
-- **Споредба со класично RL**: дискретизирај го просторот во
-  grid и спореди Q-learning со Deep RL решението, покажува зошто DRL е
-  потребен кога просторот на состојби е континуиран/високодимензионален.
-- **Ablation на domain randomization**: тренирај фиксна vs randomized
-  верзија со ист број на чекори и спореди success rate на **нови,
-  невидени** сцени — директна демонстрација на generalization vs
-  memorization (веќе поддржано преку `--fixed_scene` флегот).
-- **Ablation на wind_std**: тренирај со различни нивоа на ветер и покажи
-  како перформансите/робустноста се менуваат.
+Horizontal obstacles are enabled by default. They are disabled with
+`num_horizontal_range=(0, 0)` in the environment.
+
+### Showing flights (`evaluate.py`)
+
+```bash
+# Trajectory plots (one subplot per episode)
+python evaluate.py --model logs/best_model/best_model.zip --episodes 4
+
+# Save them as an image
+python evaluate.py --model logs/best_model/best_model.zip --episodes 4 --out flights.png
+
+# Live flight on screen (PyBullet window)
+python evaluate.py --model logs/best_model/best_model.zip --episodes 3 --gui
+```
+
+Options: `--model` (required), `--episodes`, `--out`, `--gui`,
+`--fixed_scene`, `--wind_std`.
+
+### Numeric evaluation (`evaluate_stats.py`)
+
+```bash
+# 1000 fixed scenes (seeds 1000-1999) with horizontal obstacles
+python evaluate_stats.py --model logs/final_model.zip --episodes 1000 --label my_model
+
+# The same, but with vertical obstacles only
+python evaluate_stats.py --model logs/final_model.zip --episodes 1000 --label my_model_vertical --no_horizontal
+```
+
+Options: `--model` (required), `--episodes` (default 50), `--seed_start`
+(default 1000), `--label` (name of the output files), `--no_horizontal`,
+`--wind_std`, `--outdir`.
+
+Output: `eval_results_<label>.txt` and `eval_results_<label>.json`.
+An evaluation of 1000 scenes takes about 40 minutes. Using the same `--label`
+overwrites the old results.
