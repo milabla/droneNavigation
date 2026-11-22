@@ -41,7 +41,18 @@ class NavigationAviary(BaseRLAviary):
                  trunc_penalty_per_m: float = 5.0,
                  collision_penalty: float = 30.0,
                  num_obs_tracked: int = 3,
-                 difficulty: float = 1.0):
+                 difficulty: float = 1.0,
+                 num_horizontal_range=(1, 2),
+                 horizontal_length_range=(2.0, 3.0),
+                 horizontal_radius_range=(0.06, 0.12),
+                 horizontal_z_bands=((0.25, 0.5), (0.8, 1.3), (1.6, 1.95))):
+
+        # Horizontal bars: random count, length, axis (x or y) and height band (low / middle / high).
+        # num_horizontal_range=(0, 0) disables them and gives the old vertical-only scenes.
+        self._num_horizontal_range = num_horizontal_range
+        self._horizontal_length_range = horizontal_length_range
+        self._horizontal_radius_range = horizontal_radius_range
+        self._horizontal_z_bands = horizontal_z_bands
 
         self._randomize = randomize
         self._num_obstacles_range = num_obstacles_range
@@ -156,6 +167,56 @@ class NavigationAviary(BaseRLAviary):
 
             obstacles.append({"pos": [xy[0], xy[1], height / 2.0], "radius": radius, "height": height})
 
+        # Horizontal bars (axis 0 = along x, axis 1 = along y). "height" holds the bar length.
+        # Count scales with difficulty like the vertical obstacles.
+        h_lo, h_hi = self._num_horizontal_range
+        if h_hi > 0:
+            h_hi_eff = int(round(h_hi * d))
+            h_lo_eff = min(h_lo, h_hi_eff)
+            n_horiz = np.random.randint(h_lo_eff, h_hi_eff + 1)
+            start3_full = np.array(self._start_xyzs[0], dtype=float)
+            handled = 0          # bars placed or given up on
+            band = None
+            fails = 0
+            while handled < n_horiz:
+                # Pick the height band once per bar and keep trying positions inside it, so rejections
+                # do not bias the scene toward whichever band is easiest to place.
+                if band is None:
+                    band = self._horizontal_z_bands[np.random.randint(len(self._horizontal_z_bands))]
+                    fails = 0
+                radius = np.random.uniform(*self._horizontal_radius_range)
+                length = np.random.uniform(*self._horizontal_length_range)
+                z = np.random.uniform(*band)
+                axis = int(np.random.randint(2))
+                cx = np.random.uniform(oxmin, oxmax)
+                cy = np.random.uniform(oymin, oymax)
+                bar = {"pos": [cx, cy, z], "radius": radius, "height": length, "axis": axis}
+
+                # Check clearance along the whole bar (points sampled along its axis)
+                ok = True
+                for t in np.linspace(-0.5, 0.5, 11):
+                    point = np.array([cx, cy, z])
+                    point[axis] += t * length
+                    if np.linalg.norm(point - start3_full) < self._min_clearance + radius:
+                        ok = False
+                        break
+                    if np.linalg.norm(point - self.TARGET_POS) < self._min_clearance + radius:
+                        ok = False
+                        break
+                    if any(self._surface_dist(point, o) < radius + 0.15 for o in obstacles):
+                        ok = False
+                        break
+                if not ok:
+                    fails += 1
+                    if fails >= 300:     # no room for a bar in this band: give up on it
+                        band = None
+                        handled += 1
+                    continue
+
+                obstacles.append(bar)
+                band = None
+                handled += 1
+
         self.NAV_OBSTACLES = obstacles
 
     #  Obstacles
@@ -165,8 +226,16 @@ class NavigationAviary(BaseRLAviary):
             pos = obst["pos"]
             radius = obst["radius"]
             height = obst["height"]
+            axis = obst.get("axis", 2)
+            if axis == 0:      # bar along x: rotate the cylinder's z axis onto x
+                orn = p.getQuaternionFromEuler([0.0, np.pi / 2, 0.0])
+            elif axis == 1:    # bar along y
+                orn = p.getQuaternionFromEuler([np.pi / 2, 0.0, 0.0])
+            else:              # vertical pillar
+                orn = [0.0, 0.0, 0.0, 1.0]
+            color = [0.85, 0.1, 0.1, 1.0] if axis == 2 else [0.95, 0.5, 0.1, 1.0]
             visual_id = p.createVisualShape(p.GEOM_CYLINDER, radius=radius, length=height,
-                                             rgbaColor=[0.85, 0.1, 0.1, 1.0],
+                                             rgbaColor=color,
                                              physicsClientId=self.CLIENT)
             collision_id = p.createCollisionShape(p.GEOM_CYLINDER, radius=radius, height=height,
                                                    physicsClientId=self.CLIENT)
@@ -174,6 +243,7 @@ class NavigationAviary(BaseRLAviary):
                                          baseCollisionShapeIndex=collision_id,
                                          baseVisualShapeIndex=visual_id,
                                          basePosition=pos,
+                                         baseOrientation=orn,
                                          physicsClientId=self.CLIENT)
             self.OBSTACLE_IDS.append(body_id)
 
@@ -217,17 +287,25 @@ class NavigationAviary(BaseRLAviary):
         return obs, reward, terminated, truncated, info
 
     #  Helpers
+    @staticmethod
+    def _surface_dist(pos, obst):
+        # Distance from pos to the surface of a finite cylinder (0 if inside).
+        # axis 2 = vertical pillar (default), axis 0 / 1 = horizontal bar along x / y.
+        center = np.array(obst["pos"])
+        axis = obst.get("axis", 2)
+        radial_idx = [i for i in range(3) if i != axis]
+        radial = np.linalg.norm(np.asarray(pos)[radial_idx] - center[radial_idx])
+        along = abs(pos[axis] - center[axis])
+        dr = max(radial - obst["radius"], 0.0)
+        da = max(along - obst["height"] / 2.0, 0.0)
+        return float(np.hypot(dr, da))
+
     def _obstacle_infos(self, pos):
         # List of (distance_to_surface, vector_to_center) for every obstacle, nearest first.
         infos = []
         for obst in self.NAV_OBSTACLES:
             center = np.array(obst["pos"])
-            radius = obst["radius"]
-            half_h = obst["height"] / 2.0
-            horiz_dist = np.linalg.norm(pos[:2] - center[:2])
-            dx = max(horiz_dist - radius, 0.0)
-            dz = max(abs(pos[2] - center[2]) - half_h, 0.0)
-            infos.append((float(np.hypot(dx, dz)) - self.DRONE_RADIUS, center - pos))
+            infos.append((self._surface_dist(pos, obst) - self.DRONE_RADIUS, center - pos))
         infos.sort(key=lambda t: t[0])
         return infos
 

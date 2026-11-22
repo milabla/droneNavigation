@@ -9,19 +9,27 @@ from gym_pybullet_drones.utils.enums import ActionType, Physics
 
 from drone_nav.navigation_aviary import NavigationAviary
 
-def plot_cylinder(ax, center, radius, height, color, alpha=0.35):
-    z_base = center[2] - height / 2.0
+def _cyl_points(center, radius, axis, theta, t):
+    # (theta, t) -> x, y, z of a cylinder whose axis runs along `axis` (0 = x, 1 = y, 2 = z/vertical)
+    a = radius * np.cos(theta)
+    b = radius * np.sin(theta)
+    if axis == 0:
+        return center[0] + t, center[1] + a, center[2] + b
+    if axis == 1:
+        return center[0] + a, center[1] + t, center[2] + b
+    return center[0] + a, center[1] + b, center[2] + t
+
+
+def plot_cylinder(ax, center, radius, height, color, alpha=0.35, axis=2):
     theta = np.linspace(0, 2 * np.pi, 24)
-    z = np.linspace(z_base, z_base + height, 2)
-    theta_grid, z_grid = np.meshgrid(theta, z)
-    x_grid = center[0] + radius * np.cos(theta_grid)
-    y_grid = center[1] + radius * np.sin(theta_grid)
+    t = np.linspace(-height / 2.0, height / 2.0, 2)
+    theta_grid, t_grid = np.meshgrid(theta, t)
+    x_grid, y_grid, z_grid = _cyl_points(center, radius, axis, theta_grid, t_grid)
     ax.plot_surface(x_grid, y_grid, z_grid, color=color, alpha=alpha, linewidth=0)
     # simple caps
-    for zc in (z_base, z_base + height):
-        cx = center[0] + radius * np.cos(theta)
-        cy = center[1] + radius * np.sin(theta)
-        ax.plot(cx, cy, zc, color=color, alpha=alpha)
+    for tc in (-height / 2.0, height / 2.0):
+        cx, cy, cz = _cyl_points(center, radius, axis, theta, tc)
+        ax.plot(cx, cy, cz, color=color, alpha=alpha)
 
 
 def plot_sphere(ax, center, radius, color, alpha=0.5):
@@ -81,7 +89,9 @@ def main():
         ax.scatter(*positions[-1], color='tab:blue', marker='X', s=90, label='end')
 
         for obst in obstacles:
-            plot_cylinder(ax, obst['pos'], obst['radius'], obst['height'], color='red')
+            axis = obst.get('axis', 2)
+            plot_cylinder(ax, obst['pos'], obst['radius'], obst['height'],
+                          color='red' if axis == 2 else 'darkorange', axis=axis)
 
         plot_sphere(ax, target, env.GOAL_RADIUS, color='green')
 
